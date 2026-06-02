@@ -102,7 +102,5 @@ def discard(temp_path: Optional[str]) -> None:
         return
     try:
         os.unlink(temp_path)
-    except FileNotFoundError:
-        pass
     except OSError:
         pass
