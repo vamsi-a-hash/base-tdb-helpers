@@ -254,7 +254,8 @@ def request_cancel(conn: sqlite3.Connection, job_id: str) -> Optional[JobModel]:
             """
             UPDATE jobs
                SET state = ?, cancel_requested = 1,
-                   status_message = ?, updated_at = ?
+                   status_message = ?, updated_at = ?,
+                   done_units = 0, total_units = 0 
              WHERE job_id = ? AND state = ?
             """,
             (
@@ -297,7 +298,9 @@ def finalize(
     cur = conn.execute(
         f"""
         UPDATE jobs
-           SET state = ?, stage = NULL, progress_details = NULL,
+           SET state = ?,
+               stage = CASE WHEN ? = 'COMPLETED' THEN 'DONE' ELSE stage END,
+               progress_details = NULL,
                result_graph_id = COALESCE(?, result_graph_id),
                result_summary  = ?,
                error_code      = ?,
@@ -307,6 +310,7 @@ def finalize(
          WHERE job_id = ? AND state NOT IN ({_TERMINAL_PLACEHOLDERS})
         """,
         (
+            terminal_state.value,
             terminal_state.value,
             result_graph_id,
             _dumps(result_summary),
