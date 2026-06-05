@@ -196,10 +196,10 @@ def update_progress(
         sets.append("stage = ?")
         params.append(stage.value)
     if done_units is not None:
-        sets.append("done_units = ?")
+        sets.append("done_units = CASE WHEN state IN ('CANCELLING', 'CANCELLED') THEN 0 ELSE ? END")
         params.append(done_units)
     if total_units is not None:
-        sets.append("total_units = ?")
+        sets.append("total_units = CASE WHEN state IN ('CANCELLING', 'CANCELLED') THEN 0 ELSE ? END")
         params.append(total_units)
     if status_message is not None:
         sets.append("status_message = ?")
