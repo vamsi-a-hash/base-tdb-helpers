@@ -299,6 +299,7 @@ def finalize(
         f"""
         UPDATE jobs
            SET state = ?,
+               stage = NULL,
                progress_details = NULL,
                result_graph_id = COALESCE(?, result_graph_id),
                result_summary  = ?,
