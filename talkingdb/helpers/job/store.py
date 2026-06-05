@@ -299,7 +299,6 @@ def finalize(
         f"""
         UPDATE jobs
            SET state = ?,
-               stage = CASE WHEN ? = 'COMPLETED' THEN 'DONE' ELSE stage END,
                progress_details = NULL,
                result_graph_id = COALESCE(?, result_graph_id),
                result_summary  = ?,
@@ -310,7 +309,6 @@ def finalize(
          WHERE job_id = ? AND state NOT IN ({_TERMINAL_PLACEHOLDERS})
         """,
         (
-            terminal_state.value,
             terminal_state.value,
             result_graph_id,
             _dumps(result_summary),
