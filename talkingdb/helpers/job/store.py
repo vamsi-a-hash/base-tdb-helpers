@@ -33,6 +33,11 @@ def _dumps(value: Optional[Dict[str, Any]]) -> Optional[str]:
     return json.dumps(value) if value is not None else None
 
 
+def _dumps_list(value: Optional[List[str]]) -> Optional[str]:
+    """Serialize a list payload (e.g. ``suggested_queries``) to JSON, or NULL."""
+    return json.dumps(value) if value else None
+
+
 def _loads(value: Optional[str]) -> Optional[Dict[str, Any]]:
     """Deserialize a JSON payload stored in SQLite.
 
@@ -40,6 +45,17 @@ def _loads(value: Optional[str]) -> Optional[Dict[str, Any]]:
     structured fields map cleanly back into the ``JobModel``.
     """
     return json.loads(value) if value else None
+
+
+def _loads_list(value: Optional[str]) -> Optional[List[str]]:
+    """Deserialize a JSON list of strings (e.g. ``suggested_queries``)."""
+    if not value:
+        return None
+    try:
+        data = json.loads(value)
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, list) else None
 
 
 # --------------------------------------------------------------------- schema
@@ -65,6 +81,10 @@ def init_db(conn: sqlite3.Connection) -> None:
             job_id           TEXT PRIMARY KEY,
             job_type         TEXT NOT NULL,
             session_id       TEXT,
+            namespace        TEXT,
+            title            TEXT,
+            description      TEXT,
+            suggested_queries TEXT,
             state            TEXT NOT NULL,
             stage            TEXT,
             total_units      INTEGER DEFAULT 0,
@@ -94,8 +114,15 @@ def init_db(conn: sqlite3.Connection) -> None:
     if "session_id" not in existing_cols and existing_cols:
         conn.execute("ALTER TABLE jobs ADD COLUMN session_id TEXT")
 
+    for col in ("namespace", "title", "description", "suggested_queries"):
+        if col not in existing_cols and existing_cols:
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT")
+
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_jobs_session ON jobs(session_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_namespace ON jobs(namespace)"
     )
 
 
@@ -110,6 +137,10 @@ def _row_to_job(row: sqlite3.Row) -> JobModel:
         job_id=row["job_id"],
         job_type=JobType(row["job_type"]),
         session_id=row["session_id"],
+        namespace=row["namespace"],
+        title=row["title"],
+        description=row["description"],
+        suggested_queries=_loads_list(row["suggested_queries"]),
         state=JobState(row["state"]),
         stage=JobStage(row["stage"]) if row["stage"] else None,
         total_units=row["total_units"] or 0,
@@ -138,16 +169,22 @@ def insert(conn: sqlite3.Connection, job: JobModel) -> None:
     conn.execute(
         """
         INSERT INTO jobs (
-            job_id, job_type, session_id, state, stage,
+            job_id, job_type, session_id,
+            namespace, title, description, suggested_queries,
+            state, stage,
             total_units, done_units, cancel_requested,
             filename, file_size_bytes, temp_path,
             created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             job.job_id,
             job.job_type.value,
             job.session_id,
+            job.namespace,
+            job.title,
+            job.description,
+            _dumps_list(job.suggested_queries),
             job.state.value,
             job.stage.value if job.stage else None,
             job.total_units,
@@ -372,6 +409,35 @@ def list_documents(
             "SELECT * FROM jobs WHERE session_id = ? "
             "ORDER BY created_at DESC, job_id DESC LIMIT ? OFFSET ?",
             (session_id, limit, offset),
+        ).fetchall()
+    return [_row_to_job(r) for r in rows]
+
+
+def list_namespace_documents(
+    conn: sqlite3.Connection,
+    namespace: str,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    completed_only: bool = True,
+) -> List[JobModel]:
+    """List documents within a namespace, newest first.
+
+    By default only ``COMPLETED`` documents are returned: a namespace listing is
+    a catalogue of ready-to-use documents, so in-flight or failed ingests are
+    hidden from readers. Always bounded by ``limit``/``offset``.
+    """
+    if completed_only:
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE namespace = ? AND state = ? "
+            "ORDER BY created_at DESC, job_id DESC LIMIT ? OFFSET ?",
+            (namespace, JobState.COMPLETED.value, limit, offset),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE namespace = ? "
+            "ORDER BY created_at DESC, job_id DESC LIMIT ? OFFSET ?",
+            (namespace, limit, offset),
         ).fetchall()
     return [_row_to_job(r) for r in rows]
 
