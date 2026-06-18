@@ -64,6 +64,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS jobs (
             job_id           TEXT PRIMARY KEY,
             job_type         TEXT NOT NULL,
+            session_id       TEXT,
             state            TEXT NOT NULL,
             stage            TEXT,
             total_units      INTEGER DEFAULT 0,
@@ -90,6 +91,13 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
 
+    if "session_id" not in existing_cols and existing_cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN session_id TEXT")
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_session ON jobs(session_id)"
+    )
+
 
 # ----------------------------------------------------------------- row <-> model
 def _row_to_job(row: sqlite3.Row) -> JobModel:
@@ -101,6 +109,7 @@ def _row_to_job(row: sqlite3.Row) -> JobModel:
     return JobModel(
         job_id=row["job_id"],
         job_type=JobType(row["job_type"]),
+        session_id=row["session_id"],
         state=JobState(row["state"]),
         stage=JobStage(row["stage"]) if row["stage"] else None,
         total_units=row["total_units"] or 0,
@@ -129,15 +138,16 @@ def insert(conn: sqlite3.Connection, job: JobModel) -> None:
     conn.execute(
         """
         INSERT INTO jobs (
-            job_id, job_type, state, stage,
+            job_id, job_type, session_id, state, stage,
             total_units, done_units, cancel_requested,
             filename, file_size_bytes, temp_path,
             created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             job.job_id,
             job.job_type.value,
+            job.session_id,
             job.state.value,
             job.stage.value if job.stage else None,
             job.total_units,
@@ -228,47 +238,48 @@ def request_cancel(conn: sqlite3.Connection, job_id: str) -> Optional[JobModel]:
 
     Returns the job's current state after the call, or None if unknown.
     """
-    job = get(conn, job_id)
-    if job is None:
+    if get(conn, job_id) is None:
         return None
 
-    if job.state == JobState.QUEUED:
-        conn.execute(
-            """
-            UPDATE jobs
-               SET state = ?, cancel_requested = 1,
-                   stage = NULL, 
-                   status_message = ?, completed_at = ?, updated_at = ?
-             WHERE job_id = ? AND state = ?
-            """,
-            (
-                JobState.CANCELLED.value,
-                "Upload cancelled before processing started",
-                _now_iso(),
-                _now_iso(),
-                job_id,
-                JobState.QUEUED.value,
-            ),
-        )
-    elif job.state == JobState.ONGOING:
-        conn.execute(
-            """
-            UPDATE jobs
-               SET state = ?, cancel_requested = 1,
-                   stage = NULL, 
-                   status_message = ?, updated_at = ?,
-                   done_units = 0, total_units = 0 
-             WHERE job_id = ? AND state = ?
-            """,
-            (
-                JobState.CANCELLING.value,
-                "Cancelling upload...",
-                _now_iso(),
-                job_id,
-                JobState.ONGOING.value,
-            ),
-        )
-    # CANCELLING or terminal: nothing to do - idempotent no-op.
+    now = _now_iso()
+
+    # QUEUED -> CANCELLED (work never started).
+    conn.execute(
+        """
+        UPDATE jobs
+           SET state = ?, cancel_requested = 1,
+               stage = NULL,
+               status_message = ?, completed_at = ?, updated_at = ?
+         WHERE job_id = ? AND state = ?
+        """,
+        (
+            JobState.CANCELLED.value,
+            "Upload cancelled before processing started",
+            now,
+            now,
+            job_id,
+            JobState.QUEUED.value,
+        ),
+    )
+    # ONGOING -> CANCELLING + cancel_requested flag (worker finalizes later).
+    conn.execute(
+        """
+        UPDATE jobs
+           SET state = ?, cancel_requested = 1,
+               stage = NULL,
+               status_message = ?, updated_at = ?,
+               done_units = 0, total_units = 0
+         WHERE job_id = ? AND state = ?
+        """,
+        (
+            JobState.CANCELLING.value,
+            "Cancelling upload...",
+            now,
+            job_id,
+            JobState.ONGOING.value,
+        ),
+    )
+    # CANCELLING or terminal: both guards miss - idempotent no-op.
 
     return get(conn, job_id)
 
@@ -334,6 +345,35 @@ def get(conn: sqlite3.Connection, job_id: str) -> Optional[JobModel]:
         "SELECT * FROM jobs WHERE job_id = ?", (job_id,)
     ).fetchone()
     return _row_to_job(row) if row else None
+
+
+def list_documents(
+    conn: sqlite3.Connection,
+    session_id: Optional[str] = None,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+) -> List[JobModel]:
+    """List jobs newest first, optionally filtered by session.
+
+    Always bounded by ``limit``/``offset`` so neither the filtered nor the
+    unfiltered path can return an unbounded result set as the table grows.
+    """
+    # job_id tiebreaker keeps the total order stable across pages when two
+    # rows share an identical created_at (same-microsecond concurrent uploads).
+    if session_id is None:
+        rows = conn.execute(
+            "SELECT * FROM jobs "
+            "ORDER BY created_at DESC, job_id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE session_id = ? "
+            "ORDER BY created_at DESC, job_id DESC LIMIT ? OFFSET ?",
+            (session_id, limit, offset),
+        ).fetchall()
+    return [_row_to_job(r) for r in rows]
 
 
 def is_cancel_requested(conn: sqlite3.Connection, job_id: str) -> bool:
