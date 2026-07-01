@@ -3,7 +3,6 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from talkingdb.clients.sqlite import sqlite_conn
 from talkingdb.models.auth.api_key import APIKeyModel
 
-from talkingdb.helpers.client import config
 import bcrypt
 
 security = HTTPBearer()
