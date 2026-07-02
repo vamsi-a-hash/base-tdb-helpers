@@ -18,7 +18,6 @@ def verify_api_key(
             conn=conn,
             api_key=api_key,
         )
-
     if user_email is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
